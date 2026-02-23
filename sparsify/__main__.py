@@ -20,7 +20,7 @@ from transformers import (
 from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import TrainConfig, Trainer
 from .utils import simple_parse_args_string
-
+import re
 
 @dataclass
 class RunConfig(TrainConfig):
@@ -120,12 +120,80 @@ def load_artifacts(
         assert isinstance(dataset, Dataset)
         if "input_ids" not in dataset.column_names:
             tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
-            dataset = chunk_and_tokenize(
-                dataset,
-                tokenizer,
-                max_seq_len=args.ctx_len,
+
+            def tokenize_preference_pairs(preference_pairs):
+                def parse_conversation(conversation):
+                    current_role = None
+                    messages = []
+
+                    fragments = re.split(r'(Human:|Assistant:)', conversation)
+                    for fragment in fragments:
+                        fragment = fragment.strip()
+                        if not fragment:
+                            continue
+                        if fragment == "Human:":
+                            current_role = "user"
+                        elif fragment == "Assistant:":
+                            current_role = "assistant"
+                        else:
+                            messages.append({"role": current_role, "content": fragment})
+
+                    return tokenizer.apply_chat_template(messages, tokenize=False)
+                
+                chosen_parsed = [parse_conversation(conversation) for conversation in preference_pairs["chosen"]]
+                rejected_parsed = [parse_conversation(conversation) for conversation in preference_pairs["rejected"]]
+
+                raw_chosen = tokenizer(
+                    chosen_parsed,
+                    add_special_tokens=False
+                )
+                raw_rejected = tokenizer(
+                    rejected_parsed,
+                    add_special_tokens=False
+                )
+
+                surviving_chosen = []
+                surviving_rejected = []
+                for i in range(len(chosen_parsed)):
+                    chosen_ids = raw_chosen["input_ids"][i]
+                    rejected_ids = raw_rejected["input_ids"][i]
+
+                    if len(chosen_ids) <= args.ctx_len and len(rejected_ids) <= args.ctx_len:
+                        surviving_chosen.append({
+                            "input_ids": chosen_ids,
+                            "attention_mask": raw_chosen["attention_mask"][i]
+                        })
+                        surviving_rejected.append({
+                            "input_ids": rejected_ids,
+                            "attention_mask": raw_rejected["attention_mask"][i]
+                        })
+
+                padded_chosen = tokenizer.pad(
+                    surviving_chosen,
+                    padding="max_length",
+                    max_length=args.ctx_len,
+                    return_tensors="np"
+                )
+                padded_rejected = tokenizer.pad(
+                    surviving_rejected,
+                    padding="max_length",
+                    max_length=args.ctx_len,
+                    return_tensors="np"
+                )
+
+                return {
+                    "chosen_input_ids": padded_chosen["input_ids"],
+                    "chosen_attention_mask": padded_chosen["attention_mask"],
+                    "rejected_input_ids": padded_rejected["input_ids"],
+                    "rejected_attention_mask": padded_rejected["attention_mask"],
+                }
+            
+            dataset = dataset.map(
+                tokenize_preference_pairs,
+                batched=True,
+                batched_size=2048,
                 num_proc=args.data_preprocessing_num_proc,
-                text_key=args.text_column,
+                remove_columns=dataset.column_names,
             )
         else:
             print("Dataset already tokenized; skipping tokenization.")

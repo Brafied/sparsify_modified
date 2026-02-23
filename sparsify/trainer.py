@@ -378,6 +378,27 @@ class Trainer:
 
                 if name not in self.module_plan[dist.get_rank()]:
                     return
+            
+            batch_size = outputs.shape[0] // 2
+            chosen_activations, rejected_activations = outputs.split(batch_size, dim=0)
+            chosen_mask, rejected_mask = mask.split(batch_size, dim=0)
+
+            chosen_lens = chosen_mask.sum(dim=1).long() - 1
+            rejected_lens = rejected_mask.sum(dim=1).long() - 1
+
+            chosen_last_activations = chosen_activations[
+                torch.arange(batch_size, device=outputs.device), chosen_lens
+            ]
+            rejected_last_activations = rejected_activations[
+                torch.arange(batch_size, device=outputs.device), rejected_lens
+            ]
+
+            activation_differences = chosen_last_activations - rejected_last_activations
+            
+            outputs = activation_differences.unsqueeze(1)
+            inputs = outputs
+
+            mask = torch.ones((batch_size, 1), device=outputs.device, dtype=torch.bool)
 
             # Flatten the batch and sequence dimensions
             outputs = outputs.flatten(0, 1)
@@ -451,8 +472,14 @@ class Trainer:
             sae.cfg.k = k
 
         for batch in dl:
-            x = batch["input_ids"].to(device)
-            tokens_mask = torch.isin(x, self.exclude_tokens, invert=True)
+            x = torch.cat(
+                [batch["chosen_input_ids"], batch["rejected_input_ids"]], dim=0
+            ).to(device)
+            
+            tokens_mask = torch.cat(
+                [batch["chosen_attention_mask"], batch["rejected_attention_mask"]],
+                dim=0,
+            ).to(device)
 
             if not maybe_wrapped:
                 # Wrap the SAEs with Distributed Data Parallel. We have to do this
@@ -468,7 +495,7 @@ class Trainer:
                 )
 
             # Bookkeeping for dead feature detection
-            N = tokens_mask.sum().item()
+            N = x.shape[0] // 2 
             num_tokens_in_step += N
 
             # Compute clean logits if using KL loss
@@ -499,7 +526,9 @@ class Trainer:
                         avg_kl += float(self.maybe_all_reduce(kl) / denom)
                         avg_losses = avg_kl
                     case "fvu":
-                        self.model(x)
+                        fwd_kwargs = {}
+                        fwd_kwargs["attention_mask"] = tokens_mask
+                        self.model(x, **fwd_kwargs)
                         avg_losses = dict(avg_fvu)
                     case other:
                         raise ValueError(f"Unknown loss function '{other}'")
