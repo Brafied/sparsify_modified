@@ -379,8 +379,14 @@ class Trainer:
                 if name not in self.module_plan[dist.get_rank()]:
                     return
 
+            batch_size = outputs.shape[0] // 2
+            chosen_activations, rejected_activations = outputs.split(batch_size, dim=0)
+            chosen_mask, rejected_mask = mask.split(batch_size, dim=0)
+            chosen_last_activations = chosen_activations[torch.arange(batch_size, device=outputs.device), chosen_mask.sum(dim=1).long() - 1]
+            rejected_last_activations = rejected_activations[torch.arange(batch_size, device=outputs.device), rejected_mask.sum(dim=1).long() - 1]
+
             # Flatten the batch and sequence dimensions
-            outputs = outputs[torch.arange(outputs.shape[0], device=outputs.device), mask.sum(dim=1).long() - 1]
+            outputs = chosen_last_activations - rejected_last_activations
             inputs = inputs.flatten(0, 1) if self.cfg.sae.transcode else outputs
             mask = torch.ones(outputs.shape[0], device=outputs.device, dtype=torch.bool)
 
@@ -451,8 +457,8 @@ class Trainer:
             sae.cfg.k = k
 
         for batch in dl:
-            x = batch["input_ids"].to(device)
-            tokens_mask = batch["attention_mask"].to(device)
+            x = torch.cat([batch["chosen_input_ids"], batch["rejected_input_ids"]], dim=0).to(device)
+            tokens_mask = torch.cat([batch["chosen_attention_mask"], batch["rejected_attention_mask"]], dim=0).to(device)
 
             if not maybe_wrapped:
                 # Wrap the SAEs with Distributed Data Parallel. We have to do this
@@ -468,7 +474,7 @@ class Trainer:
                 )
 
             # Bookkeeping for dead feature detection
-            N = x.shape[0]
+            N = x.shape[0] // 2
             num_tokens_in_step += N
 
             # Compute clean logits if using KL loss

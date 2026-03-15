@@ -20,6 +20,7 @@ from transformers import (
 from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import TrainConfig, Trainer
 from .utils import simple_parse_args_string
+import re
 
 @dataclass
 class RunConfig(TrainConfig):
@@ -120,33 +121,99 @@ def load_artifacts(
         if "input_ids" not in dataset.column_names:
             tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
 
-            def template_and_tokenize_conversations(batch):
-                templated_conversations = [tokenizer.apply_chat_template(conversation, tokenize=False) for conversation in batch["conversation"]]
-                tokenized_conversations = tokenizer(templated_conversations, add_special_tokens=False)
-                filtered_conversations = []
-                for i in range(len(templated_conversations)):
-                    input_ids = tokenized_conversations["input_ids"][i]
-                    if len(input_ids) <= args.ctx_len:
-                        filtered_conversations.append({
-                            "input_ids": input_ids,
-                            "attention_mask": tokenized_conversations["attention_mask"][i]
+            # def template_and_tokenize_conversations(batch):
+            #     templated_conversations = [tokenizer.apply_chat_template(conversation, tokenize=False) for conversation in batch["conversation"]]
+            #     tokenized_conversations = tokenizer(templated_conversations, add_special_tokens=False)
+            #     filtered_conversations = []
+            #     for i in range(len(templated_conversations)):
+            #         input_ids = tokenized_conversations["input_ids"][i]
+            #         if len(input_ids) <= args.ctx_len:
+            #             filtered_conversations.append({
+            #                 "input_ids": input_ids,
+            #                 "attention_mask": tokenized_conversations["attention_mask"][i]
+            #             })
+            #     if len(filtered_conversations) == 0:
+            #         return {
+            #             "input_ids": [],
+            #             "attention_mask": []
+            #         }
+            #     padded_conversations = tokenizer.pad(
+            #         filtered_conversations,
+            #         padding="max_length",
+            #         max_length=args.ctx_len,
+            #         return_tensors="np"
+            #     )
+            #     return {
+            #         "input_ids": padded_conversations["input_ids"],
+            #         "attention_mask": padded_conversations["attention_mask"]
+            #     }
+            
+            # dataset = dataset.map(
+            #     template_and_tokenize_conversations,
+            #     batched=True,
+            #     batch_size=2048,
+            #     num_proc=args.data_preprocessing_num_proc,
+            #     remove_columns=dataset.column_names,
+            # )
+            def template_and_tokenize_conversations(preference_pairs):
+                def template_conversation(conversation):
+                    messages = []
+                    current_role = None
+                    for conversation_fragment in re.split(r'(Human:|Assistant:)', conversation):
+                        conversation_fragment = conversation_fragment.strip()
+                        if not conversation_fragment:
+                            continue
+                        if conversation_fragment == "Human:":
+                            current_role = "user"
+                        elif conversation_fragment == "Assistant:":
+                            current_role = "assistant"
+                        else:
+                            messages.append({"role": current_role, "content": conversation_fragment})
+                    return tokenizer.apply_chat_template(messages, tokenize=False)
+                templated_chosen_conversations = [template_conversation(conversation) for conversation in preference_pairs["chosen"]]
+                templated_rejected_conversations = [template_conversation(conversation) for conversation in preference_pairs["rejected"]]
+                tokenized_chosen_conversations = tokenizer(templated_chosen_conversations, add_special_tokens=False)
+                tokenized_rejected_conversation = tokenizer(templated_rejected_conversations, add_special_tokens=False)
+                filtered_chosen_conversation = []
+                filtered_rejected_conversation = []
+                for i in range(len(templated_chosen_conversations)):
+                    chosen_input_ids = tokenized_chosen_conversations["input_ids"][i]
+                    rejected_input_ids = tokenized_rejected_conversation["input_ids"][i]
+                    if len(chosen_input_ids) <= args.ctx_len and len(rejected_input_ids) <= args.ctx_len:
+                        filtered_chosen_conversation.append({
+                            "input_ids": chosen_input_ids,
+                            "attention_mask": tokenized_chosen_conversations["attention_mask"][i]
                         })
-                if len(filtered_conversations) == 0:
+                        filtered_rejected_conversation.append({
+                            "input_ids": rejected_input_ids,
+                            "attention_mask": tokenized_rejected_conversation["attention_mask"][i]
+                        })
+                if len(filtered_chosen_conversation) == 0:
                     return {
-                        "input_ids": [],
-                        "attention_mask": []
+                        "chosen_input_ids": [],
+                        "chosen_attention_mask": [],
+                        "rejected_input_ids": [],
+                        "rejected_attention_mask": [],
                     }
-                padded_conversations = tokenizer.pad(
-                    filtered_conversations,
+                padded_chosen_conversations = tokenizer.pad(
+                    filtered_chosen_conversation,
+                    padding="max_length",
+                    max_length=args.ctx_len,
+                    return_tensors="np"
+                )
+                padded_rejected_conversations = tokenizer.pad(
+                    filtered_rejected_conversation,
                     padding="max_length",
                     max_length=args.ctx_len,
                     return_tensors="np"
                 )
                 return {
-                    "input_ids": padded_conversations["input_ids"],
-                    "attention_mask": padded_conversations["attention_mask"]
+                    "chosen_input_ids": padded_chosen_conversations["input_ids"],
+                    "chosen_attention_mask": padded_chosen_conversations["attention_mask"],
+                    "rejected_input_ids": padded_rejected_conversations["input_ids"],
+                    "rejected_attention_mask": padded_rejected_conversations["attention_mask"],
                 }
-            
+
             dataset = dataset.map(
                 template_and_tokenize_conversations,
                 batched=True,
@@ -154,6 +221,7 @@ def load_artifacts(
                 num_proc=args.data_preprocessing_num_proc,
                 remove_columns=dataset.column_names,
             )
+      
         else:
             print("Dataset already tokenized; skipping tokenization.")
 
