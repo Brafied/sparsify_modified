@@ -378,32 +378,11 @@ class Trainer:
 
                 if name not in self.module_plan[dist.get_rank()]:
                     return
-            
-            batch_size = outputs.shape[0] // 2
-            chosen_activations, rejected_activations = outputs.split(batch_size, dim=0)
-            chosen_mask, rejected_mask = mask.split(batch_size, dim=0)
-
-            chosen_lens = chosen_mask.sum(dim=1).long() - 1
-            rejected_lens = rejected_mask.sum(dim=1).long() - 1
-
-            chosen_last_activations = chosen_activations[
-                torch.arange(batch_size, device=outputs.device), chosen_lens
-            ]
-            rejected_last_activations = rejected_activations[
-                torch.arange(batch_size, device=outputs.device), rejected_lens
-            ]
-
-            activation_differences = chosen_last_activations - rejected_last_activations
-            
-            outputs = activation_differences.unsqueeze(1)
-            inputs = outputs
-
-            mask = torch.ones((batch_size, 1), device=outputs.device, dtype=torch.bool)
 
             # Flatten the batch and sequence dimensions
-            outputs = outputs.flatten(0, 1)
+            outputs = outputs[torch.arange(outputs.shape[0], device=outputs.device), mask.sum(dim=1).long() - 1]
             inputs = inputs.flatten(0, 1) if self.cfg.sae.transcode else outputs
-            mask = mask.flatten(0, 1)
+            mask = torch.ones(outputs.shape[0], device=outputs.device, dtype=torch.bool)
 
             # Remove tokens not used for training
             all_outputs = outputs.detach().clone()
@@ -472,14 +451,8 @@ class Trainer:
             sae.cfg.k = k
 
         for batch in dl:
-            x = torch.cat(
-                [batch["chosen_input_ids"], batch["rejected_input_ids"]], dim=0
-            ).to(device)
-            
-            tokens_mask = torch.cat(
-                [batch["chosen_attention_mask"], batch["rejected_attention_mask"]],
-                dim=0,
-            ).to(device)
+            x = batch["input_ids"].to(device)
+            tokens_mask = batch["attention_mask"].to(device)
 
             if not maybe_wrapped:
                 # Wrap the SAEs with Distributed Data Parallel. We have to do this
@@ -495,7 +468,7 @@ class Trainer:
                 )
 
             # Bookkeeping for dead feature detection
-            N = x.shape[0] // 2 
+            N = x.shape[0]
             num_tokens_in_step += N
 
             # Compute clean logits if using KL loss
@@ -526,9 +499,7 @@ class Trainer:
                         avg_kl += float(self.maybe_all_reduce(kl) / denom)
                         avg_losses = avg_kl
                     case "fvu":
-                        fwd_kwargs = {}
-                        fwd_kwargs["attention_mask"] = tokens_mask
-                        self.model(x, **fwd_kwargs)
+                        self.model(x)
                         avg_losses = dict(avg_fvu)
                     case other:
                         raise ValueError(f"Unknown loss function '{other}'")

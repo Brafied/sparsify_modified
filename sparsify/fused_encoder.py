@@ -26,12 +26,11 @@ class FusedEncoder(torch.autograd.Function):
         bias:   (M,)
         k:      int (number of top elements to select along dim=1)
         """
-        preacts = F.linear(input, weight, bias)
+        preacts = F.relu(F.linear(input, weight, bias))
 
         # Get top-k values and indices for each row
         if activation == "topk":
-            _, indices = torch.topk(preacts.abs(), k, -1, sorted=False)
-            values = torch.gather(preacts, -1, indices)            
+            values, indices = torch.topk(preacts, k, dim=-1, sorted=False)         
         elif activation == "groupmax":
             values, indices = preacts.unflatten(-1, (k, -1)).max(dim=-1)
 
