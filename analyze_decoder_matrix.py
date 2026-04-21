@@ -5,11 +5,11 @@ import torch.nn.functional as F
 
 def main():
     argument_parser = argparse.ArgumentParser()
-    argument_parser.add_argument("--sae_path", required=True, type=str)
+    argument_parser.add_argument("--sae_directory", required=True, type=str)
     argument_parser.add_argument("--device", required=True, choices=["cpu", "cuda"])
     arguments = argument_parser.parse_args()
 
-    sae = Sae.load_from_disk(arguments.sae_path, device=arguments.device, decoder=True)
+    sae = Sae.load_from_disk(arguments.sae_directory, device=arguments.device, decoder=True)
     w_dec = sae.W_dec.float()
 
     rank = torch.linalg.matrix_rank(w_dec).item()
